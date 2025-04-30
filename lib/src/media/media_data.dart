@@ -1,3 +1,5 @@
+// ignore_for_file: constant_identifier_names, use_super_parameters
+
 abstract class Enum<T> {
   final T _value;
 
