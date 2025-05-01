@@ -21,36 +21,23 @@ import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.Future
-import java.util.concurrent.Executors
-import java.util.concurrent.LinkedBlockingQueue
-import java.util.concurrent.ThreadPoolExecutor
-import java.util.concurrent.TimeUnit
 
 /**
  * VideoCompressPlugin
  */
 class VideoCompressPlugin : MethodCallHandler, FlutterPlugin {
 
+
     private var _context: Context? = null
     private var _channel: MethodChannel? = null
     private val TAG = "VideoCompressPlugin"
     private val LOG = Logger(TAG)
-    private var transcodeFuture: Future<Void>? = null
+    private var transcodeFuture:Future<Void>? = null
     var channelName = "video_compress"
 
-    // Optimized thread pool for faster task execution
-    private val threadPool = ThreadPoolExecutor(
-        4, // Increased core pool size for concurrent tasks
-        8, // Increased max pool size for bursty workloads
-        30L, // Reduced keep-alive time to free resources faster
-        TimeUnit.SECONDS,
-        LinkedBlockingQueue<Runnable>(),
-        Executors.defaultThreadFactory()
-    )
-
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
-        val context = _context
-        val channel = _channel
+        val context = _context;
+        val channel = _channel;
 
         if (context == null || channel == null) {
             Log.w(TAG, "Calling VideoCompress plugin before initialization")
@@ -61,30 +48,31 @@ class VideoCompressPlugin : MethodCallHandler, FlutterPlugin {
             "getByteThumbnail" -> {
                 val path = call.argument<String>("path")
                 val quality = call.argument<Int>("quality")!!
-                val position = call.argument<Int>("position")!!
+                val position = call.argument<Int>("position")!! // to long
                 ThumbnailUtility(channelName).getByteThumbnail(path!!, quality, position.toLong(), result)
             }
             "getFileThumbnail" -> {
                 val path = call.argument<String>("path")
                 val quality = call.argument<Int>("quality")!!
-                val position = call.argument<Int>("position")!!
-                ThumbnailUtility("video_compress").getFileThumbnail(context, path!!, quality, position.toLong(), result)
+                val position = call.argument<Int>("position")!! // to long
+                ThumbnailUtility("video_compress").getFileThumbnail(context, path!!, quality,
+                        position.toLong(), result)
             }
             "getMediaInfo" -> {
                 val path = call.argument<String>("path")
                 result.success(Utility(channelName).getMediaInfoJson(context, path!!).toString())
             }
             "deleteAllCache" -> {
-                result.success(Utility(channelName).deleteAllCache(context, result))
+                result.success(Utility(channelName).deleteAllCache(context, result));
             }
             "setLogLevel" -> {
                 val logLevel = call.argument<Int>("logLevel")!!
                 Logger.setLogLevel(logLevel)
-                result.success(true)
+                result.success(true);
             }
             "cancelCompression" -> {
                 transcodeFuture?.cancel(true)
-                result.success(false)
+                result.success(false);
             }
             "compressVideo" -> {
                 val path = call.argument<String>("path")!!
@@ -93,39 +81,79 @@ class VideoCompressPlugin : MethodCallHandler, FlutterPlugin {
                 val startTime = call.argument<Int>("startTime")
                 val duration = call.argument<Int>("duration")
                 val includeAudio = call.argument<Boolean>("includeAudio") ?: true
-                val frameRate = 20 // Fixed at 20fps for faster compression
+                val frameRate = if (call.argument<Int>("frameRate")==null) 30 else call.argument<Int>("frameRate")
 
-                // Use cache directory for faster I/O
-                val tempDir: String = context.cacheDir.absolutePath
-                val out = SimpleDateFormat("yyyyMMdd_HHmmss").format(Date())
-                val destPath: String = "$tempDir${File.separator}VID_$out${path.hashCode()}.mp4"
+                val tempDir: String = context.getExternalFilesDir("video_compress")!!.absolutePath
+                val out = SimpleDateFormat("yyyy-MM-dd hh-mm-ss").format(Date())
+                val destPath: String = tempDir + File.separator + "VID_" + out + path.hashCode() + ".mp4"
 
-                val videoTrackStrategy: TrackStrategy = getOptimizedVideoStrategy(quality)
-                val audioTrackStrategy: TrackStrategy = getOptimizedAudioStrategy(includeAudio)
+                var videoTrackStrategy: TrackStrategy = DefaultVideoStrategy.atMost(340).build();
+                val audioTrackStrategy: TrackStrategy
 
-                val dataSource = if (startTime != null || duration != null) {
+                when (quality) {
+
+                    0 -> {
+                      videoTrackStrategy = DefaultVideoStrategy.atMost(720).build()
+                    }
+
+                    1 -> {
+                        videoTrackStrategy = DefaultVideoStrategy.atMost(360).build()
+                    }
+                    2 -> {
+                        videoTrackStrategy = DefaultVideoStrategy.atMost(640).build()
+                    }
+                    3 -> {
+
+                        assert(value = frameRate != null)
+                        videoTrackStrategy = DefaultVideoStrategy.Builder()
+                                .keyFrameInterval(3f)
+                                .bitRate(1280 * 720 * 4.toLong())
+                                .frameRate(frameRate!!) // will be capped to the input frameRate
+                                .build()
+                    }
+                    4 -> {
+                        videoTrackStrategy = DefaultVideoStrategy.atMost(480, 640).build()
+                    }
+                    5 -> {
+                        videoTrackStrategy = DefaultVideoStrategy.atMost(540, 960).build()
+                    }
+                    6 -> {
+                        videoTrackStrategy = DefaultVideoStrategy.atMost(720, 1280).build()
+                    }
+                    7 -> {
+                        videoTrackStrategy = DefaultVideoStrategy.atMost(1080, 1920).build()
+                    }                    
+                }
+
+                audioTrackStrategy = if (includeAudio) {
+                    val sampleRate = DefaultAudioStrategy.SAMPLE_RATE_AS_INPUT
+                    val channels = DefaultAudioStrategy.CHANNELS_AS_INPUT
+
+                    DefaultAudioStrategy.builder()
+                        .channels(channels)
+                        .sampleRate(sampleRate)
+                        .build()
+                } else {
+                    RemoveTrackStrategy()
+                }
+
+                val dataSource = if (startTime != null || duration != null){
                     val source = UriDataSource(context, Uri.parse(path))
                     TrimDataSource(source, (1000 * 1000 * (startTime ?: 0)).toLong(), (1000 * 1000 * (duration ?: 0)).toLong())
-                } else {
+                }else{
                     UriDataSource(context, Uri.parse(path))
                 }
 
-                // Maximize transcoder speed
-                Transcoder.setFastestSpeed(true)
 
-                transcodeFuture = Transcoder.into(destPath)
-                    .addDataSource(dataSource)
-                    .setAudioTrackStrategy(audioTrackStrategy)
-                    .setVideoTrackStrategy(videoTrackStrategy)
-                    .setExecutor(threadPool)
-                    .setListener(object : TranscoderListener {
-                        override fun onTranscodeProgress(progress: Double) {
-                            threadPool.execute {
+                transcodeFuture = Transcoder.into(destPath!!)
+                        .addDataSource(dataSource)
+                        .setAudioTrackStrategy(audioTrackStrategy)
+                        .setVideoTrackStrategy(videoTrackStrategy)
+                        .setListener(object : TranscoderListener {
+                            override fun onTranscodeProgress(progress: Double) {
                                 channel.invokeMethod("updateProgress", progress * 100.00)
                             }
-                        }
-                        override fun onTranscodeCompleted(successCode: Int) {
-                            threadPool.execute {
+                            override fun onTranscodeCompleted(successCode: Int) {
                                 channel.invokeMethod("updateProgress", 100.00)
                                 val json = Utility(channelName).getMediaInfoJson(context, destPath)
                                 json.put("isCancel", false)
@@ -134,105 +162,19 @@ class VideoCompressPlugin : MethodCallHandler, FlutterPlugin {
                                     File(path).delete()
                                 }
                             }
-                        }
-                        override fun onTranscodeCanceled() {
-                            result.success(null)
-                        }
-                        override fun onTranscodeFailed(exception: Throwable) {
-                            Log.e(TAG, "Compression failed", exception)
-                            result.success(null)
-                        }
-                    }).transcode()
+
+                            override fun onTranscodeCanceled() {
+                                result.success(null)
+                            }
+
+                            override fun onTranscodeFailed(exception: Throwable) {
+                                result.success(null)
+                            }
+                        }).transcode()
             }
             else -> {
                 result.notImplemented()
             }
-        }
-    }
-
-    /**
-     * Get optimized video strategy for faster compression
-     */
-    private fun getOptimizedVideoStrategy(quality: Int): TrackStrategy {
-        return when (quality) {
-            0 -> { // High quality
-                DefaultVideoStrategy.Builder()
-                    .keyFrameInterval(10f) // Increased for faster encoding
-                    .bitRate(720 * 1280 * 1.toLong()) // Reduced bitrate
-                    .frameRate(20) // Fixed lower frame rate
-                    .build()
-            }
-            1 -> { // Medium quality
-                DefaultVideoStrategy.Builder()
-                    .keyFrameInterval(10f)
-                    .bitRate(360 * 640 * 0.8.toLong()) // Lower bitrate
-                    .frameRate(20)
-                    .build()
-            }
-            2 -> { // Low quality - fastest
-                DefaultVideoStrategy.Builder()
-                    .keyFrameInterval(12f) // Longer interval for speed
-                    .bitRate(360 * 640 * 0.5.toLong()) // Minimal bitrate
-                    .frameRate(20)
-                    .build()
-            }
-            3 -> { // Custom quality
-                DefaultVideoStrategy.Builder()
-                    .keyFrameInterval(10f)
-                    .bitRate(720 * 1280 * 1.toLong())
-                    .frameRate(20)
-                    .build()
-            }
-            4 -> { // Faster 480p
-                DefaultVideoStrategy.Builder()
-                    .keyFrameInterval(12f)
-                    .bitRate(480 * 640 * 0.7.toLong())
-                    .frameRate(20)
-                    .build()
-            }
-            5 -> { // Faster 540p
-                DefaultVideoStrategy.Builder()
-                    .keyFrameInterval(10f)
-                    .bitRate(540 * 960 * 0.7.toLong())
-                    .frameRate(20)
-                    .build()
-            }
-            6 -> { // Faster 720p
-                DefaultVideoStrategy.Builder()
-                    .keyFrameInterval(10f)
-                    .bitRate(720 * 1280 * 0.8.toLong())
-                    .frameRate(20)
-                    .build()
-            }
-            7 -> { // Faster 1080p
-                DefaultVideoStrategy.Builder()
-                    .keyFrameInterval(8f) // Slightly lower for quality
-                    .bitRate(1080 * 1920 * 0.8.toLong())
-                    .frameRate(20)
-                    .build()
-            }
-            else -> { // Default - very fast
-                DefaultVideoStrategy.Builder()
-                    .keyFrameInterval(12f)
-                    .bitRate(480 * 640 * 0.5.toLong())
-                    .frameRate(20)
-                    .build()
-            }
-        }
-    }
-
-    /**
-     * Get optimized audio strategy for faster compression
-     */
-    private fun getOptimizedAudioStrategy(includeAudio: Boolean): TrackStrategy {
-        return if (includeAudio) {
-            DefaultAudioStrategy.builder()
-                .channels(1) // Mono for speed
-                .sampleRate(32000) // Reduced sample rate
-                .bitRate(32 * 1000) // Lower bitrate for faster processing
-                .build()
-        } else {
-            RemoveTrackStrategy()
         }
     }
 
@@ -244,7 +186,6 @@ class VideoCompressPlugin : MethodCallHandler, FlutterPlugin {
         _channel?.setMethodCallHandler(null)
         _context = null
         _channel = null
-        threadPool.shutdown()
     }
 
     private fun init(context: Context, messenger: BinaryMessenger) {
@@ -257,4 +198,5 @@ class VideoCompressPlugin : MethodCallHandler, FlutterPlugin {
     companion object {
         private const val TAG = "video_compress"
     }
+
 }
